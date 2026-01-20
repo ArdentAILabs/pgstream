@@ -274,9 +274,18 @@ func (a *dmlAdapter) filterRowColumns(cols []wal.Column, schemaInfo schemaInfo) 
 		// Without this, complex JSON with Unicode, emojis, or special escapes
 		// can be serialized differently, causing "invalid input syntax for
 		// type json" errors on the target database.
+		//
+		// IMPORTANT: Only serialize map/slice types. If the value is already
+		// a string (e.g., from schemalog snapshot generator which passes
+		// string(schema)), we must NOT double-encode it.
 		if (c.Type == "jsonb" || c.Type == "json") && val != nil {
-			if jsonBytes, err := json.Marshal(val); err == nil {
-				val = jsonBytes // Pass as []byte - pgx will send as-is for JSONB
+			switch val.(type) {
+			case map[string]any, []any:
+				// These types come from Sonic/pgx JSON parsing and need re-serialization
+				if jsonBytes, err := json.Marshal(val); err == nil {
+					val = jsonBytes // Pass as []byte - pgx will send as-is for JSONB
+				}
+			// string, []byte, and other types are passed through unchanged
 			}
 		}
 
