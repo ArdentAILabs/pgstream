@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/xataio/pgstream/internal/json"
 	pglib "github.com/xataio/pgstream/internal/postgres"
 	loglib "github.com/xataio/pgstream/pkg/log"
 	"github.com/xataio/pgstream/pkg/wal"
@@ -190,7 +191,7 @@ func (a *dmlAdapter) buildWhereQuery(d *wal.Data, placeholderOffset int) (string
 			whereQuery = fmt.Sprintf("%s AND", whereQuery)
 		}
 		whereQuery = fmt.Sprintf("%s %s = $%d", whereQuery, pglib.QuoteIdentifier(c.Name), i+placeholderOffset+1)
-		whereValues = append(whereValues, c.Value)
+		whereValues = append(whereValues, serializeJSONBValue(c.Type, c.Value))
 	}
 	return whereQuery, whereValues, nil
 }
@@ -266,6 +267,9 @@ func (a *dmlAdapter) filterRowColumns(cols []wal.Column, schemaInfo schemaInfo) 
 		}
 		rowColumns = append(rowColumns, pglib.QuoteIdentifier(c.Name))
 		val := c.Value
+
+		val = serializeJSONBValue(c.Type, val)
+
 		if a.forCopy {
 			val = updateValueForCopy(val, c.Type)
 		}
@@ -317,4 +321,19 @@ func getInfinityValueForDateTime(value any, colType string) any {
 		return pgtype.Timestamptz{Valid: true, InfinityModifier: v}
 	}
 	return value
+}
+
+// serializeJSONBValue pre-serializes JSONB/JSON map/slice values with Sonic to
+// ensure consistent encoding between Sonic (wal2json parsing) and pgx (encoding/json).
+// String values pass through unchanged to avoid double-encoding.
+func serializeJSONBValue(colType string, val any) any {
+	if (colType == "jsonb" || colType == "json") && val != nil {
+		switch val.(type) {
+		case map[string]any, []any:
+			if jsonBytes, err := json.Marshal(val); err == nil {
+				return jsonBytes
+			}
+		}
+	}
+	return val
 }
