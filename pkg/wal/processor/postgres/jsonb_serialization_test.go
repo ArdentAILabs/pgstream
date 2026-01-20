@@ -12,87 +12,71 @@ import (
 	"github.com/xataio/pgstream/pkg/wal"
 )
 
-// TestFilterRowColumnsJSONBHandling verifies JSONB columns are pre-serialized
-// with Sonic to prevent encoding mismatches with pgx (which uses encoding/json).
 func TestFilterRowColumnsJSONBHandling(t *testing.T) {
 	t.Parallel()
 
-	// JSONB with emoji, unicode, and quotes - the problematic cases
 	var jsonbValue map[string]any
-	err := sonicjson.Unmarshal([]byte(`{
+	require.NoError(t, sonicjson.Unmarshal([]byte(`{
 		"name": "David Richard 🏳️‍🌈",
 		"location": "São Paulo",
 		"quote": "said \"hello\""
-	}`), &jsonbValue)
-	require.NoError(t, err)
+	}`), &jsonbValue))
 
 	cols := []wal.Column{
 		{Name: "id", Type: "integer", Value: 1},
 		{Name: "data", Type: "jsonb", Value: jsonbValue},
 	}
 
-	adapter := &dmlAdapter{forCopy: false}
-	_, values := adapter.filterRowColumns(cols, schemaInfo{})
+	_, values := (&dmlAdapter{}).filterRowColumns(cols, schemaInfo{})
 
-	// After fix: JSONB should be []byte (pre-serialized), not map[string]any
 	jsonbResult, ok := values[1].([]byte)
-	require.True(t, ok, "JSONB should be pre-serialized to []byte, got %T", values[1])
+	require.True(t, ok, "JSONB map should be pre-serialized to []byte, got %T", values[1])
 
-	// Verify it's valid JSON
 	var parsed map[string]any
 	require.NoError(t, json.Unmarshal(jsonbResult, &parsed))
 	require.Equal(t, "David Richard 🏳️‍🌈", parsed["name"])
 }
 
-// TestFilterRowColumnsJSONBStringNotDoubleEncoded verifies that when JSONB value
-// is already a string (like from schemalog snapshot generator), it should NOT
-// be double-encoded. This tests the bug reported by bugbot.
-func TestFilterRowColumnsJSONBStringNotDoubleEncoded(t *testing.T) {
+func TestFilterRowColumnsJSONBStringPassthrough(t *testing.T) {
 	t.Parallel()
 
-	// This simulates what schemalog snapshot generator does:
-	// It marshals Schema to JSON bytes, then passes string(schema) as the value
+	// Simulates schemalog snapshot generator passing string(schema)
 	originalJSON := `{"tables":[{"name":"users"}]}`
 
 	cols := []wal.Column{
 		{Name: "id", Type: "integer", Value: 1},
-		{Name: "schema", Type: "jsonb", Value: originalJSON}, // string, not map!
+		{Name: "schema", Type: "jsonb", Value: originalJSON},
 	}
 
-	adapter := &dmlAdapter{forCopy: false}
-	_, values := adapter.filterRowColumns(cols, schemaInfo{})
+	_, values := (&dmlAdapter{}).filterRowColumns(cols, schemaInfo{})
 
-	// The value should NOT be double-encoded
-	// If buggy: it would become `"{\"tables\":[{\"name\":\"users\"}]}"`
-	// If correct: it should remain as-is or be []byte of the same JSON
+	// String values must pass through unchanged (not double-encoded)
+	result, ok := values[1].(string)
+	require.True(t, ok, "JSONB string should remain string, got %T", values[1])
+	require.Equal(t, originalJSON, result)
+}
 
-	switch v := values[1].(type) {
-	case []byte:
-		// If converted to []byte, it should be the SAME JSON, not double-encoded
-		require.Equal(t, originalJSON, string(v),
-			"JSONB string should not be double-encoded")
-	case string:
-		// If kept as string, it should be unchanged
-		require.Equal(t, originalJSON, v,
-			"JSONB string should not be modified")
-	default:
-		t.Fatalf("Unexpected type for JSONB value: %T", values[1])
+func TestFilterRowColumnsJSONBArrayHandling(t *testing.T) {
+	t.Parallel()
+
+	var jsonbValue []any
+	require.NoError(t, sonicjson.Unmarshal([]byte(`[
+		{"name": "item1", "emoji": "🎉"},
+		{"name": "item2", "location": "São Paulo"}
+	]`), &jsonbValue))
+
+	cols := []wal.Column{
+		{Name: "id", Type: "integer", Value: 1},
+		{Name: "items", Type: "jsonb", Value: jsonbValue},
 	}
 
-	// Extra check: the result should be valid JSON that parses to the original structure
-	var resultBytes []byte
-	switch v := values[1].(type) {
-	case []byte:
-		resultBytes = v
-	case string:
-		resultBytes = []byte(v)
-	}
+	_, values := (&dmlAdapter{}).filterRowColumns(cols, schemaInfo{})
 
-	var parsed map[string]any
-	err := json.Unmarshal(resultBytes, &parsed)
-	require.NoError(t, err, "Result should be valid JSON, got: %s", string(resultBytes))
+	jsonbResult, ok := values[1].([]byte)
+	require.True(t, ok, "JSONB array should be pre-serialized to []byte, got %T", values[1])
 
-	tables, ok := parsed["tables"].([]any)
-	require.True(t, ok, "Should have tables array")
-	require.Len(t, tables, 1)
+	var parsed []any
+	require.NoError(t, json.Unmarshal(jsonbResult, &parsed))
+	require.Len(t, parsed, 2)
+	require.Equal(t, "🎉", parsed[0].(map[string]any)["emoji"])
 }
